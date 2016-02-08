@@ -642,13 +642,13 @@ If BACKWARD is non-nil, search backward."
   "Move cursor to the next code-point."
   (interactive)
   (or (ubb--search-property 'codepoint nil)
-      (user-error "No more codepoints")))
+      (user-error "No more code-points")))
 
 (defun ubb-backward-codepoint ()
   "Move cursor to the previous code-point."
   (interactive)
   (or (ubb--search-property 'codepoint t)
-      (user-error "No more codepoints")))
+      (user-error "No more code-points")))
 
 (defun ubb-browse-block (block &optional codepoint)
   "Browse the Unicode block BLOCK.
@@ -700,6 +700,30 @@ prompt for the codepoint instead for the Unicode block."
 (defun ubb-reset-text-scale ()
   (interactive)
   (text-scale-set 0))
+
+(defun ubb-copy-to-kill-ring ()
+  "Save the current code-point in the kill ring."
+  (interactive)
+  (kill-new (string (ubb--current-codepoint)))
+  (message "Current kill is %S" (current-kill 0)))
+
+(defun ubb-append-to-kill ()
+  "Append the current code-point to the latest kill."
+  (interactive)
+  (kill-append (string (ubb--current-codepoint)) nil)
+  (message "Current kill is %S" (current-kill 0)))
+
+(defun ubb-insert (buffer)
+  "Insert the current code-point into BUFFER and switch to that buffer.
+Intractively, prompt for a buffer name (using `other-buffer' as default)."
+  (interactive (list (progn
+		       (ubb--current-codepoint)
+		       (read-buffer "Insert into buffer: "
+				    (list (other-buffer (current-buffer) t))
+				    t))))
+  (let ((codepoint (ubb--current-codepoint)))
+    (pop-to-buffer buffer)
+    (insert-char codepoint)))
 
 (defun ubb-redraw ()
   "Redraw the current set."
@@ -761,6 +785,9 @@ prompt for the codepoint instead for the Unicode block."
      ["Next set in group" ubb-next-set :key-sequence ">"]
      ["Previous set in group" ubb-prev-set :key-sequence "<"])
     "--"
+    ["Insert code-point into buffer" ubb-insert]
+    ["Copy code-point to kill-ring" ubb-copy-to-kill-ring]
+    "--"
     ["Describe code-point briefly" ubb-describe-codepoint-briefly]
     ["Show code-point details" ubb-describe-codepoint]
     ("Movement"
@@ -799,6 +826,9 @@ prompt for the codepoint instead for the Unicode block."
 (define-key ubb-mode-map (kbd "+") #'text-scale-increase)
 (define-key ubb-mode-map (kbd "-") #'text-scale-decrease)
 (define-key ubb-mode-map (kbd "*") #'ubb-reset-text-scale)
+(define-key ubb-mode-map (kbd "c") #'ubb-copy-to-kill-ring)
+(define-key ubb-mode-map (kbd "a") #'ubb-append-to-kill)
+(define-key ubb-mode-map (kbd "<RET>") #'ubb-insert)
 (define-key ubb-mode-map (kbd "g") #'ubb-redraw)
 (define-key ubb-mode-map (kbd "q") #'ubb-quit)
 
