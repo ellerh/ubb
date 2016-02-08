@@ -45,10 +45,12 @@
 			(:predicate nil) (:copier nil))
   ;; NAME is a string for display purposes.
   (name "" :type string :read-only t)
-  ;; RANGES is a list of the form ((START . END) ...)
+  ;; RANGES is a list or a function.
+  ;; If a list then it looks like ((START . END) ...)
   ;; START and END denote a range of codepoints.
   ;; START is inclusive; END is exclusive.
-  (ranges () :type list :read-only t))
+  ;; If a function, it returns a list of ranges of the above form.
+  (ranges () :type (or list function) :read-only t))
 
 (defun ubb--check-range (x)
   (cl-assert (consp x))
@@ -64,7 +66,8 @@
 	  (< (car r1) (car r2)))))
 
 (defun ubb--ranges-to-set (ranges)
-  (cond ((null ranges) '())
+  (cond ((functionp ranges) (ubb--ranges-to-set (funcall ranges)))
+	((null ranges) '())
 	((null (cdr ranges)) ranges)
 	(t
 	 (let ((sorted (ubb--sort-ranges ranges)))
@@ -82,28 +85,34 @@
 		       (cdr sorted) :initial-value (list (car sorted))))))))
 
 (defun ubb--make-set (name ranges)
-  (cl-check-type name string) (cl-check-type ranges list)
-  (mapc #'ubb--check-range ranges)
-  (let* ((sorted (ubb--ranges-to-set ranges)))
-    (cl-loop for ((_ . end1) (start2 . _)) on sorted
-	     while start2
-	     do (cl-assert (<= end1 start2)))
-    (ubb--make-set% name sorted)))
+  (cl-check-type name string) (cl-check-type ranges (or list function))
+  (ubb--make-set% name ranges))
 
 (defun ubb--set-size (set)
-  (cl-loop for (start . end) in (ubb--set-ranges set)
+  (cl-loop for (start . end) in (ubb--ranges-to-set (ubb--set-ranges set))
 	   sum (- end start)))
 
-;; Call FUN for each codepoint in SET.  FUN receives two arguments:
-;; and "index" and the codepoint.
-(defun ubb--set-foreachi (fun set)
-  (let ((i 0))
-    (cl-loop for (start . end) in (ubb--set-ranges set) do
-	     (cl-loop for codepoint from start below end do
-		      (funcall fun i codepoint)
-		      (cl-incf i)))))
+(defun ubb--set-foreach (fun set)
+  (cl-loop for (start . end) in (ubb--ranges-to-set (ubb--set-ranges set))
+	   do (cl-loop for codepoint from start below end
+		       do (funcall fun codepoint))))
 
-(defun ubb--set-member? (set codepoint)
+(defun ubb--set-fold (fun init set)
+  (let ((state init))
+    (ubb--set-foreach (lambda (codepoint)
+			(setq state (funcall fun codepoint state)))
+		      set)
+    state))
+
+(defun ubb--set-count (set test)
+  (let ((sum 0))
+    (ubb--set-foreach (lambda (codepoint)
+			(when (funcall test codepoint)
+			  (cl-incf sum)))
+		      set)
+    sum))
+
+(defun ubb--set-member (set codepoint)
   (cl-loop for (start . end) in (ubb--set-ranges set)
 	   thereis (and (<= start codepoint) (< codepoint end))))
 
@@ -186,13 +195,16 @@
 	      (buffer-substring (point) (point-max))))))
     (ubb--parse-blocks)))
 
+(defvar ubb--all-blocks-cache nil)
+
 (defun ubb--all-blocks ()
   "Return a sequence of all blocks."
-  (ubb--load-blocks))
+  (or ubb--all-blocks-cache
+      (setq ubb--all-blocks-cache (ubb--load-blocks))))
 
 (defun ubb--find-block-by-codepoint (codepoint)
   (cl-find-if (lambda (block)
-		(ubb--set-member? block codepoint))
+		(ubb--set-member block codepoint))
 	      (ubb--all-blocks)))
 
 (defun ubb--unicode-block-header (set)
@@ -211,7 +223,7 @@
 ;; ranges.  Also the cons cell for the range argument is updated so
 ;; it's a good idea to copy the contents instead of using the cons
 ;; cell.
-(defun ubb--charset-to-set (charset)
+(defun ubb--charset-ranges (charset)
   (let ((ranges '()))
     (map-charset-chars (lambda (from+to _)
 			 (cl-destructuring-bind (from &rest to) from+to
@@ -219,10 +231,13 @@
 			   (cl-assert (characterp to))
 			   (push (cons from (1+ to)) ranges)))
 		       charset)
-    (ubb--make-set (or (get-charset-property charset :long-name)
-		       (get-charset-property charset :short-name)
-		       (format "%s" charset))
-		   ranges)))
+    ranges))
+
+(defun ubb--charset-to-set (charset)
+  (ubb--make-set (or (get-charset-property charset :long-name)
+		     (get-charset-property charset :short-name)
+		     (format "%s" charset))
+		 (lambda () (ubb--charset-ranges charset))))
 
 (defun ubb--charsets-without-aliases ()
   (reverse ; ascii first, please
@@ -381,6 +396,29 @@
 	   :key #'ubb--set-name :test #'equal))
 
 
+;;; Codepoint filter
+
+(defvar ubb--categories-to-hide '(Cn Cs Co))
+
+(defmacro ubb--define-hide-category-toggle (name category)
+  `(defun ,name ()
+     (interactive)
+     (cond ((memq ',category ubb--categories-to-hide)
+	    (setq ubb--categories-to-hide
+		  (remove ',category ubb--categories-to-hide)))
+	   (t
+	    (push ',category ubb--categories-to-hide)))))
+
+(ubb--define-hide-category-toggle ubb-toggle-hide-not-assigned-codepoints Cn)
+(ubb--define-hide-category-toggle ubb-toggle-hide-surrogates Cs)
+(ubb--define-hide-category-toggle ubb-toggle-hide-private-use-codepoints Co)
+
+(defun ubb--hide-codepoint-p (codepoint)
+  (and ubb--categories-to-hide
+       (let ((cat (get-char-code-property codepoint 'general-category)))
+	 (memq cat ubb--categories-to-hide))))
+
+
 ;;; Display
 
 (defconst ubb--space " ")
@@ -405,7 +443,7 @@
 
 (defface ubb-invisible
   '((t :inherit tooltip))
-  "Face used for codepoints that would otherwise be invisible/transparent."
+  "Face used for code-points that would otherwise be invisible/transparent."
   :group 'ubb)
 
 (defun ubb--propertize (string codepoint)
@@ -447,24 +485,27 @@
 	 (right-limit (- (window-width win t)
 			 (* ubb--right-margin font-width)))
 	 (line-start (point))
-	 (set-size (ubb--set-size set)))
+	 (count (ubb--set-count set (lambda (c)
+				      (not (ubb--hide-codepoint-p c)))))
+	 (i 0))
     (insert-char ?\s ubb--left-margin)
-    (ubb--set-foreachi
-     (lambda (i codepoint)
-       (ubb--insert-codepoint win codepoint font-width)
-       (let ((w (car (window-text-pixel-size win line-start (point)))))
-	 (when (<= right-limit w)
-	   (insert "\n")
-	   (setq line-start (point))
-	   (insert-char ?\s ubb--left-margin)
-	   (message "%.f%%" (* 100.0 (/ (float i) set-size)))
-	   (redisplay))))
+    (ubb--set-foreach
+     (lambda (codepoint)
+       (unless (ubb--hide-codepoint-p codepoint)
+	 (ubb--insert-codepoint win codepoint font-width)
+	 (cl-incf i)
+	 (let ((w (car (window-text-pixel-size win line-start (point)))))
+	   (when (<= right-limit w)
+	     (insert "\n")
+	     (setq line-start (point))
+	     (insert-char ?\s ubb--left-margin)
+	     (message "%.f%%" (* 100.0 (/ (float i) count)))
+	     (redisplay)))))
      set)
     (message nil)))
 
 (defun ubb--clear-codepoint-info ()
   (message nil))
-
 
 ;; Return a short description for codepoint.  This basically the
 ;; Unicode name.
@@ -483,7 +524,7 @@
   (let ((codepoint (get-text-property (point) 'codepoint)))
     (cond (codepoint)
 	  (noerror nil)
-	  (t (user-error "No codepoint selected")))))
+	  (t (user-error "No code-point selected")))))
 
 ;; This is called from post-command-hook.
 (defun ubb--codepoint-sensor ()
@@ -542,12 +583,12 @@
 ;;; Commands
 
 (defun ubb-describe-codepoint-briefly ()
-  "Show name and category of the current codepoint."
+  "Show name and category of the current code-point."
   (interactive)
   (ubb--show-codepoint-info (ubb--current-codepoint)))
 
 (defun ubb-describe-codepoint ()
-  "Describe the current codepoint."
+  "Describe the current code-point."
   (interactive)
   (when (ubb--current-codepoint)
     (describe-char (point))))
@@ -598,13 +639,13 @@ If BACKWARD is non-nil, search backward."
           (t (goto-char start) nil))))
 
 (defun ubb-forward-codepoint ()
-  "Move cursor to the next codepoint."
+  "Move cursor to the next code-point."
   (interactive)
   (or (ubb--search-property 'codepoint nil)
       (user-error "No more codepoints")))
 
 (defun ubb-backward-codepoint ()
-  "Move cursor to the previous codepoint."
+  "Move cursor to the previous code-point."
   (interactive)
   (or (ubb--search-property 'codepoint t)
       (user-error "No more codepoints")))
@@ -614,7 +655,7 @@ If BACKWARD is non-nil, search backward."
 Interactively without prefix arg, prompt for the block name.
 With negative prefix arg, use the character at point to find
 the corresponding block.
-With positive positive arg, prompt for the name or number of the codepoint
+With positive positive arg, prompt for the name or number of the code-point
 \(see `read-char-by-name')."
   (interactive
    (cond ((not current-prefix-arg)
@@ -628,9 +669,9 @@ With positive positive arg, prompt for the name or number of the codepoint
 			 (char-after))
 			(t
 			 (read-char-by-name
-			  "Codepoint (Unicode name or hex): "))))
+			  "Code-point (Unicode name or hex): "))))
 		 (block (or (ubb--find-block-by-codepoint codepoint)
-			    (user-error "No block for codepoint: %X"
+			    (user-error "No block for code-point: %X"
 					codepoint))))
 	    (list block codepoint)))))
   (with-current-buffer (ubb--browse-set ubb--unicode-blocks-group block)
@@ -714,21 +755,29 @@ prompt for the codepoint instead for the Unicode block."
     "--"
     ["Select group by name" ubb-browse-group-by-name]
     ["Select set by name" ubb-select-set-by-name]
-    ["Select Unicode block by codepoint" ubb-browse-block-by-codepoint]
+    ["Select Unicode block by code-point" ubb-browse-block-by-codepoint]
     ("Select set in current group"
      ("Sets in current group" :filter ubb--set-menu-filter)
      ["Next set in group" ubb-next-set :key-sequence ">"]
      ["Previous set in group" ubb-prev-set :key-sequence "<"])
     "--"
-    ["Describe character briefly" ubb-describe-codepoint-briefly]
-    ["Show character details" ubb-describe-codepoint]
+    ["Describe code-point briefly" ubb-describe-codepoint-briefly]
+    ["Show code-point details" ubb-describe-codepoint]
     ("Movement"
-     ["Move to next character" ubb-forward-codepoint]
-     ["Move to previous character" ubb-backward-codepoint])
+     ["Move to next code-point" ubb-forward-codepoint]
+     ["Move to previous code-point" ubb-backward-codepoint])
     ("Zoom"
      ["Increase scale factor" text-scale-increase]
      ["Decrease scale factor" text-scale-decrease]
      ["Reset scale factor" ubb-reset-text-scale])
+    ("Options"
+     ["Hide not assigned code-points" ubb-toggle-hide-not-assigned-codepoints
+      :style toggle :selected (memq 'Cn ubb--categories-to-hide)]
+     ["Hide surrogates" ubb-toggle-hide-surrogates
+      :style toggle :selected (memq 'Cs ubb--categories-to-hide)]
+     ["Hide code-points within private-use areas"
+      ubb-toggle-hide-private-use-codepoints
+      :style toggle :selected (memq 'Co ubb--categories-to-hide)])
     "--"
     ["Redraw" ubb-redraw]
     ["Quit" ubb-quit]))
