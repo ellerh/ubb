@@ -27,14 +27,19 @@
 ;; The browser displays the current "set" of the current "group".  A
 ;; set is a collection of codepoints, e.g. the Unicode Block "Box
 ;; Drawing" is such a set.  Groups are collections of sets, e.g. all
-;; Unicode Blocks form a group.
-;;
-;; Displaying large sets can be slow.  Don't hesitate to press C-g if
-;; it takes too long.
+;; Unicode Blocks form a group.  The commands
+;; `ubb-browse-group-by-name'/`ubb-select-set-by-name' can used to
+;; select the current group/set.
 
 ;;; Code
 
 (require 'cl-lib)
+
+;; term/internal.el doesn't provide any feature.  Not sure what the proper
+;; way is to load it.
+(defvar IT-unicode-translations)
+(unless (boundp 'IT-unicode-translations)
+  (load "term/internal"))
 
 
 ;;; Some type definitions
@@ -45,7 +50,7 @@
 			(:predicate nil) (:copier nil))
   ;; NAME is a string for display purposes.
   (name "" :type string :read-only t)
-  ;; RANGES%% is a list or a function.
+  ;; RANGES%% is either a list or a function.
   ;; If a list then it looks like ((START . END) ...)
   ;; START and END denote a range of codepoints.
   ;; START is inclusive; END is exclusive.
@@ -61,11 +66,10 @@
 	(lambda (r1 r2)
 	  (< (car r1) (car r2)))))
 
-;; A "rangeset" is a list of ranges.  The ranges are sorted
-;; and non-overlapping.
+;; A "rangeset" is a list of ranges.  The ranges in a rangeset are
+;; non-overlapping and ordered by start point.
 (defun ubb--ranges-to-rangeset (ranges)
-  (cond ((functionp ranges) (ubb--ranges-to-rangeset (funcall ranges)))
-	((null ranges) '())
+  (cond ((null ranges) '())
 	((null (cdr ranges)) ranges)
 	(t
 	 (let ((sorted (ubb--sort-ranges ranges)))
@@ -409,11 +413,12 @@
 
 ;;; Codepoint filter
 
-(defun ubb--unicode-category-symbols ()
-  (let ((result '()))
-    (map-char-table (lambda (_ cat) (cl-pushnew cat result))
-		    unicode-category-table)
-    result))
+(eval-and-compile
+  (defun ubb--unicode-category-symbols ()
+    (let ((result '()))
+      (map-char-table (lambda (_ cat) (cl-pushnew cat result))
+		      unicode-category-table)
+      result)))
 
 (defcustom ubb-categories-to-hide '(Cn Cs Co)
   "List of Unicode category symbols.
@@ -436,6 +441,7 @@ Characters belonging to these categories will not be displayed."
 (ubb--define-hide-category-toggle ubb-toggle-hide-surrogates Cs)
 (ubb--define-hide-category-toggle ubb-toggle-hide-private-use-codepoints Co)
 
+;; Return the set of hidden codepoints.
 (defun ubb--hidden-rangeset ()
   (cond ((null ubb-categories-to-hide) '())
 	(t
@@ -450,53 +456,29 @@ Characters belonging to these categories will not be displayed."
 	   (ubb--ranges-to-rangeset ranges)))))
 
 
-;;;
-
-
 ;;; Display
-
-(defconst ubb--space " ")
-(defconst ubb--thin-space (string #x2009))
-
-;; Insert space around the string from START to END so that the region
-;; occupies approximately 2*FONT-WIDTH pixels.  Inserting space is
-;; generally a good idea to "neutralize" combining marks.
-(defun ubb--insert-space (win start end font-width)
-  (let ((pixel-width (car (window-text-pixel-size win start end))))
-    (cond ((<= pixel-width font-width)
-	   (save-excursion
-	     (goto-char start)
-	     (insert ubb--space)))
-	  ((< pixel-width (* 2 font-width))
-	   (save-excursion
-	     (goto-char start)
-	     (insert ubb--thin-space)))
-	  (t
-	   ;; give up
-	   ))))
 
 (defface ubb-invisible
   '((t :inherit tooltip))
   "Face used for code-points that would otherwise be invisible/transparent."
   :group 'ubb)
 
-(defun ubb--propertize (string codepoint)
-  (let ((s (propertize string 'codepoint codepoint
-		       'help-echo #'ubb--help-echo)))
-    (cond ((memq (get-char-code-property codepoint 'general-category)
-		 '(Cf Zs Zl Zp))
-	   (propertize s 'face 'ubb-invisible))
-	  (t s))))
+(defvar ubb--invisible-categories '(Cf Zs Zl Zp))
 
-(defun ubb--insert-codepoint (win codepoint font-width)
-  (let* ((s (cl-case codepoint
-	      (?\n "^J")
-	      (t (string codepoint))))
-	 (s (ubb--propertize s codepoint))
-	 (start (point))
-	 (_ (insert s))
-	 (end (point)))
-    (ubb--insert-space win start end font-width)))
+(defun ubb--propertize (start end codepoint)
+  (add-text-properties start end (list 'codepoint codepoint
+				       'help-echo #'ubb--help-echo))
+  (when (memq (get-char-code-property codepoint 'general-category)
+	      ubb--invisible-categories)
+    (add-text-properties start end '(face ubb-invisible))))
+
+(defun ubb--insert-codepoint (codepoint)
+  (insert " ")
+  (let* ((start (point))
+	 (_ (insert (cl-case codepoint
+		      (?\n "^J")
+		      (t codepoint)))))
+    (ubb--propertize start (point) codepoint)))
 
 ;; FIXME: only for compatibility with Emacs 24
 (defun ubb--default-font-width ()
@@ -526,7 +508,7 @@ Characters belonging to these categories will not be displayed."
     (ubb--rangeset-foreach
      rangeset
      (lambda (codepoint)
-       (ubb--insert-codepoint win codepoint font-width)
+       (ubb--insert-codepoint codepoint)
        (cl-incf i)
        (let ((w (car (window-text-pixel-size win line-start (point)))))
 	 (when (<= right-limit w)
@@ -620,8 +602,8 @@ Characters belonging to these categories will not be displayed."
 	 (old (get-char-code-property codepoint 'old-name))
 	 (cat (get-char-code-property codepoint 'general-category))
 	 (catdesc (char-code-property-description 'general-category cat)))
-    (format "\"%c\" %s (%s: %s)" codepoint (or name old "[no name]")
-	     cat catdesc)))
+    (format "\"%c\" %s (%s: %s) U+%04X" codepoint (or name old "[no name]")
+	     cat catdesc codepoint)))
 
 (defun ubb--show-codepoint-info (codepoint)
   (message "%s" (ubb--short-description codepoint)))
@@ -646,9 +628,31 @@ Characters belonging to these categories will not be displayed."
 
 (defvar ubb--buffer-set)   ; The currently displayed ubb--set
 (defvar ubb--buffer-group) ; The group to which ubb--buffer-set belongs
+(defvar ubb--buffer-hidden-codepoints-count)
 
 (define-derived-mode ubb-mode fundamental-mode "ubb"
-  "Mode for viewing the characters in Unicode blocks and other charsets."
+  "\\<ubb-mode-map>\
+Mode for viewing the characters in Unicode blocks and other charsets.
+
+The browser displays the current \"set\" of the current \"group\".  A
+set is a collection of code-points, e.g. the Unicode Block \"Box
+Drawing\" is such a set.  Groups are collections of sets, e.g. all
+Unicode Blocks form a group.
+
+Example: To view the \"Box Drawing\" block, first select the
+\"Unicode blocks\" group with:
+  \\[ubb-browse-group-by-name] \"Unicode blocks\" RET
+then select the \"Box Drawing\" set with:
+  \\[ubb-select-set-by-name] \"Box Drawing\" RET
+
+Main commands:
+\\[ubb-browse-group-by-name] - Select a group and display its first set.
+\\[ubb-select-set-by-name] - Select a set from the current group.
+\\[ubb-next-set] - Select the next set in the current group.
+\\[ubb-prev-set] - Select the previous set in the current group.
+\\[ubb-insert] - Insert the current code-point into a buffer.
+\\[ubb-copy-to-kill-ring] - Copy current code-point to the kill-ring.
+"
   (setq-local bidi-display-reordering nil)
   (setq-local truncate-lines t)
   (read-only-mode 1)
@@ -676,17 +680,15 @@ as possible.  This can be slow."
   :group 'ubb
   :type '(radio (const buttons) (const nil)))
 
-(defun ubb--display-set (set)
+(defun ubb--display-rangeset (rangeset)
   (let* ((inhibit-read-only t))
     (erase-buffer)
     (let* ((win (display-buffer (current-buffer)))
 	   (_ (select-window win))
-	   (pos (point))
-	   (rs (ubb--rangeset-difference (ubb--set-rangeset set)
-					 (ubb--hidden-rangeset))))
+	   (pos (point)))
       (cl-ecase ubb-incremental-display
-	((nil) (insert "\n") (ubb--insert-rangeset rs))
-	((buttons) (ubb--insert-rangeset/buttons rs)))
+	((nil) (insert "\n") (ubb--insert-rangeset rangeset))
+	((buttons) (ubb--insert-rangeset/buttons rangeset)))
       (set-window-point win pos)
       (current-buffer))))
 
@@ -699,8 +701,45 @@ as possible.  This can be slow."
   (with-current-buffer (ubb--get-buffer)
     (setq-local ubb--buffer-group group)
     (setq-local ubb--buffer-set set)
-    (setq header-line-format (funcall (ubb--group-header group) set))
-    (ubb--display-set set)))
+    (let* ((rs1 (ubb--set-rangeset set))
+	   (rs (ubb--rangeset-difference rs1 (ubb--hidden-rangeset)))
+	   (nhidden (- (ubb--rangeset-size rs1) (ubb--rangeset-size rs))))
+      (setq header-line-format
+	    (concat (funcall (ubb--group-header group) set)
+		    (if (> nhidden 0) (format "  [%d hidden]" nhidden))))
+      (ubb--display-rangeset rs))))
+
+
+;;; ASCII replacements
+
+;; For fonts that don't have proper glyphs for some codepoints it may
+;; be useful to display an ASCII string instead.  E.g. "i." could be
+;; used instead of ı (dotless i).
+;;
+;; This uses buffer-display-table to do that.  The replacement strings
+;; come from `IT-unicode-translations'.
+
+(defun ubb--codepoint-displayable-p (codepoint)
+  (char-displayable-p codepoint))
+
+(defun ubb-toggle-ascii-replacements ()
+  "Toggle whether to display some glyphs with ASCII replacements."
+  (interactive)
+  (cond (buffer-display-table (setq buffer-display-table nil))
+	(t
+	 (let ((dtab (make-display-table)))
+	   (cl-loop for (from to vector) in IT-unicode-translations do
+		    (cl-loop for c from from to to
+			     for glyph across vector do
+			     (when (and glyph
+					(not (ubb--codepoint-displayable-p c)))
+			       (let* ((string (cl-etypecase glyph
+						(integer (string glyph))
+						(string glyph)))
+				      (vector (vconcat string)))
+				 (aset dtab c vector)))))
+	   (setq buffer-display-table dtab))))
+  (recenter))
 
 
 ;;; Commands
@@ -878,7 +917,7 @@ Intractively, prompt for a buffer name (using `other-buffer' as default)."
 (defun ubb-redraw ()
   "Redraw the current set."
   (interactive)
-  (ubb--display-set ubb--buffer-set))
+  (ubb--browse-set ubb--buffer-group ubb--buffer-set))
 
 (defun ubb-browse ()
   "Start the character browser."
@@ -952,24 +991,28 @@ Intractively, prompt for a buffer name (using `other-buffer' as default)."
      ["Move to previous button" ubb-backward-button
       :active (text-property-not-all (point-min) (point-max) 'rangeset nil)])
     ("Zoom"
+     :visible window-system
      ["Increase scale factor" text-scale-increase]
      ["Decrease scale factor" text-scale-decrease]
      ["Reset scale factor" ubb-reset-text-scale])
     ("Options"
      ["Hide not assigned code-points" ubb-toggle-hide-not-assigned-codepoints
       :style toggle :selected (memq 'Cn ubb-categories-to-hide)]
-     ["Hide surrogates" ubb-toggle-hide-surrogates
-      :style toggle :selected (memq 'Cs ubb-categories-to-hide)]
      ["Hide code-points within private-use areas"
       ubb-toggle-hide-private-use-codepoints
       :style toggle :selected (memq 'Co ubb-categories-to-hide)]
+     ["Hide surrogates" ubb-toggle-hide-surrogates
+      :style toggle :selected (memq 'Cs ubb-categories-to-hide)]
      "--"
      ["Display buttons for large sets"
       (lambda () (interactive) (setq ubb-incremental-display 'buttons))
       :style radio :selected (eq ubb-incremental-display 'buttons)]
      ["Non-incremental display"
       (lambda () (interactive) (setq ubb-incremental-display nil))
-      :style radio :selected (eq ubb-incremental-display 'nil)])
+      :style radio :selected (eq ubb-incremental-display 'nil)]
+     "--"
+     ["ASCII replacements" ubb-toggle-ascii-replacements
+      :style toggle :selected buffer-display-table])
     "--"
     ["Redraw" ubb-redraw]
     ["Quit" ubb-quit]))
@@ -977,7 +1020,7 @@ Intractively, prompt for a buffer name (using `other-buffer' as default)."
 
 ;;; Key bindings
 
-(define-key ubb-mode-map (kbd "<SPC>") #'ubb-describe-codepoint-briefly)
+(define-key ubb-mode-map (kbd "SPC") #'ubb-describe-codepoint-briefly)
 (define-key ubb-mode-map (kbd "D") #'ubb-describe-codepoint)
 (define-key ubb-mode-map (kbd "f") #'ubb-forward-codepoint)
 (define-key ubb-mode-map (kbd "b") #'ubb-backward-codepoint)
@@ -995,11 +1038,12 @@ Intractively, prompt for a buffer name (using `other-buffer' as default)."
 (define-key ubb-mode-map (kbd "*") #'ubb-reset-text-scale)
 (define-key ubb-mode-map (kbd "c") #'ubb-copy-to-kill-ring)
 (define-key ubb-mode-map (kbd "a") #'ubb-append-to-kill)
-(define-key ubb-mode-map (kbd "<RET>") #'ubb-insert)
+(define-key ubb-mode-map (kbd "RET") #'ubb-insert)
+(define-key ubb-mode-map (kbd "~") #'ubb-toggle-ascii-replacements)
 (define-key ubb-mode-map (kbd "g") #'ubb-redraw)
 (define-key ubb-mode-map (kbd "q") #'ubb-quit)
 
-(define-key ubb--button-keymap (kbd "<RET>") #'ubb-toggle-button)
+(define-key ubb--button-keymap (kbd "RET") #'ubb-toggle-button)
 (define-key ubb--button-keymap (kbd "<mouse-1>") #'ubb-toggle-button)
 
 (provide 'ubb)
