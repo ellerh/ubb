@@ -89,8 +89,8 @@
 (defun ubb--set-ranges% (set)
   (let ((ranges%% (ubb--set-ranges%% set)))
     (cl-etypecase ranges%%
-      (list ranges%%)
-      (function (funcall ranges%%)))))
+      (function (funcall ranges%%))
+      (list ranges%%))))
 
 (defun ubb--set-rangeset (set)
   (ubb--ranges-to-rangeset (ubb--set-ranges% set)))
@@ -111,6 +111,7 @@
   (cl-loop for (start . end) in rangeset
 	   sum (- end start)))
 
+;; Remove rangest Y from rangeset X, i.e. X \ Y.
 (defun ubb--rangeset-difference (x y)
   (cond ((null y) x)
 	(t
@@ -166,8 +167,8 @@
 (defun ubb--group-sets (group)
   (let ((sets%% (ubb--group-sets%% group)))
     (cl-etypecase sets%%
-      (sequence sets%%)
-      (function (setf (ubb--group-sets%% group) (funcall sets%%))))))
+      (function (setf (ubb--group-sets%% group) (funcall sets%%)))
+      (sequence sets%%))))
 
 
 ;;; Unicode blocks
@@ -548,9 +549,10 @@ Characters belonging to these categories will not be displayed."
 	 (inhibit-read-only t))
     (delete-region start end)
     (ubb--insert-button rangeset (not collapsed?))
-    (goto-char start))
-  (message "toggle"))
+    (goto-char start)))
 
+;; Split rangeset RANGESET into two rangesets and return them as a
+;; list (X Y).  X contains the first N elements and Y the rest.
 (defun ubb--split-rangeset (rangeset n)
   (let ((left '())
 	(count 0)
@@ -571,6 +573,9 @@ Characters belonging to these categories will not be displayed."
 
 (defvar ubb--codepoints-per-button 256)
 
+;; Insert the codepoinst in RANGESET and if needed add +/- buttons.
+;; Show the first `ubb--codepoints-per-button' codepoints in RANGESET
+;; immediately.
 (defun ubb--insert-rangeset/buttons (rangeset)
   (let ((n ubb--codepoints-per-button))
     (cl-destructuring-bind (first rest) (ubb--split-rangeset rangeset n)
